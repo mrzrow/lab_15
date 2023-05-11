@@ -250,7 +250,6 @@ Matrix<float> Matrix<T>::operator!() const {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             Matrix<T> sub = this->sub_matrix(i, j);
-            // alg_adj.get_matrix_ref()[i][j] = sub.det();
             if ((i + j) % 2 == 0)
                 sign = 1;
             else 
@@ -258,13 +257,6 @@ Matrix<float> Matrix<T>::operator!() const {
             alg_adj.set_matrix_value(i, j, sign * sub.det());
         }
     }
-
-    // for (int i = 0; i < rows; ++i) {
-    //     for (int j = 0; j < cols; ++j) {
-    //         if ((i + j) % 2 != 0)
-    //             alg_adj.matrix[i][j] *= -1;
-    //     }
-    // }
 
     alg_adj.transpose();
     alg_adj = alg_adj * (1/_det);
@@ -278,7 +270,6 @@ Matrix<int> Matrix<T>::eye(int _rows, int _cols) {
     for (int i = 0; i < _rows; ++i) {
         for (int j = 0; j < _cols; ++j) {
             if (i == j)
-                // ret.get_matrix_ref()[i][j] = 1;
                 ret.set_matrix_value(i, j, 1);
         }
     }
