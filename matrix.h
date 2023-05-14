@@ -8,7 +8,7 @@
 
 template<typename T>
 class Matrix {
-    int rows{}, cols{};
+    int rows, cols;
     std::vector<std::vector<T>> matrix = {};
 
 public:
@@ -19,13 +19,6 @@ public:
     Matrix(std::vector<std::vector<T>>);
    ~Matrix() = default;
 
-    void print() {
-        for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < cols; ++j)
-                std::cout << matrix[i][j] << "  ";
-            std::cout << std::endl;
-        }
-    }
 
     T         det() const;
     Matrix<T> sub_matrix(int, int) const;
