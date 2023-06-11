@@ -9,6 +9,12 @@
 #include <future>
 #include <algorithm>
 
+int get_rows_in_chunk(int rows, int& chunks) {
+    chunks = (chunks > rows ? rows : chunks);
+    int rowsInChunk = rows / chunks;
+    return rowsInChunk;
+}
+
 template<typename T>
 class Matrix {
 public:
@@ -24,20 +30,21 @@ public:
     Matrix(std::vector<std::vector<T>>);
     ~Matrix() = default;
 
-    T det() const;
+    T det() const;                        // parallel done
     Matrix<T> sub_matrix(int, int) const;
     void transpose();
-    void set_matrix_value(int i, int j, T a) { matrix[i][j] = a; }
 
-    T get_matrix_value(int i, int j) const { return matrix[i][j]; }
+    void set_matrix_value(int i, int j, T a)       { matrix[i][j] = a;    }
+    T    get_matrix_value(int i, int j)      const { return matrix[i][j]; }
+
     std::vector<std::vector<T>> get_matrix() const { return this->matrix; }
     int get_rows() const { return rows; }
     int get_cols() const { return cols; }
 
-    Matrix<T> operator*(const Matrix<T> &) const;
-    Matrix<T> operator*(const T &) const;
+    Matrix<T> operator*(const Matrix<T> &) const; // parallel done
+    Matrix<T> operator*(const T &)         const; // parallel done
 
-    Matrix<T> operator+(const Matrix<T> &) const;
+    Matrix<T> operator+(const Matrix<T> &) const; // parallel done
     Matrix<T> operator-(const Matrix<T> &) const;
 
     Matrix<float> operator!() const;
@@ -51,7 +58,12 @@ public:
     static Matrix<int> zero(int, int);
 
     Matrix<T> parallelMultiply(const Matrix<T> &, int chunks = 1) const;
-    Matrix<T> parallelMultiply(T, int chunks = 1) const;
+    Matrix<T> parallelMultiply(T, int chunks = 1)                 const;
+
+    T parallelDeterminant() const;
+
+    Matrix<T> parallelAdd(const Matrix<T>&, int chunks = 1)       const;
+    Matrix<T> parallelSubstract(const Matrix<T>&, int chunks = 1) const;
 };
 
 // ##### CONSTRUCTORS && DESTRUCTORS #####
@@ -292,7 +304,7 @@ Matrix<int> Matrix<T>::zero(int _rows, int _cols) {
 
 // ##### PARALLEL VERSIONS #####
 template<typename T>
-void multiplyChunkByMatrix(Matrix<T>& res, const Matrix<T> &m1, const Matrix<T> &m2, int chunk, int rowsInChunk) {
+void multiplyChunkByMatrix(Matrix<T> &res, const Matrix<T> &m1, const Matrix<T> &m2, int chunk, int rowsInChunk) {
     int start = chunk * rowsInChunk;
     int stop = (start + rowsInChunk <= res.get_rows() ? start + rowsInChunk : res.get_rows());
     for (int row = start; row < stop; ++row) {
@@ -307,25 +319,6 @@ void multiplyChunkByMatrix(Matrix<T>& res, const Matrix<T> &m1, const Matrix<T> 
 }
 
 template<typename T>
-Matrix<T> Matrix<T>::parallelMultiply(const Matrix<T> &other, int chunks) const {
-    this->matrixMutex.lock();
-    Matrix<T> result(this->get_rows(), other.get_cols());
-    chunks = (chunks > this->get_rows() ? this->get_rows() : chunks);
-    int rowsInChunk = this->get_rows() / chunks;
-    this->matrixMutex.unlock();
-
-    std::vector<std::thread> threads{};
-    for (auto chunk = 0; chunk < chunks; ++chunk) {
-        threads.push_back(
-                std::thread(multiplyChunkByMatrix<T>, std::ref(result), std::ref(*this), std::ref(other),
-                           chunk, rowsInChunk)
-        );
-    }
-    for (auto & thread : threads) { thread.join(); }
-    return result;
-}
-
-template<typename T>
 void multiplyChunkByValue(T val, Matrix<T> &m, int chunk, int rowsInChunk) {
     int start = chunk * rowsInChunk;
     int stop = (start + rowsInChunk <= m.get_rows() ? start + rowsInChunk : m.get_rows());
@@ -337,11 +330,40 @@ void multiplyChunkByValue(T val, Matrix<T> &m, int chunk, int rowsInChunk) {
 }
 
 template<typename T>
+void addMatrixToChunk(const Matrix<T>& m2, Matrix<T>& m, int chunk, int rowsInChunk) {
+    int start = chunk * rowsInChunk;
+    int stop = (start + rowsInChunk <= m.get_rows() ? start + rowsInChunk : m.get_rows());
+    for (int i = start; i < stop; ++i) {
+        for (int j = 0; j < m.get_cols(); ++j) {
+            m.set_matrix_value(i, j, m.get_matrix_value(i, j) + m2.get_matrix_value(i, j));
+        }
+    }
+}
+
+
+template<typename T>
+Matrix<T> Matrix<T>::parallelMultiply(const Matrix<T> &other, int chunks) const {
+    this->matrixMutex.lock();
+    Matrix<T> result(this->get_rows(), other.get_cols());
+    int rowsInChunk = get_rows_in_chunk(this->get_rows(), chunks);
+    this->matrixMutex.unlock();
+
+    std::vector<std::thread> threads{};
+    for (auto chunk = 0; chunk < chunks; ++chunk) {
+        threads.push_back(
+                std::thread(multiplyChunkByMatrix<T>, std::ref(result), std::ref(*this), std::ref(other),
+                            chunk, rowsInChunk)
+        );
+    }
+    for (auto &thread: threads) { thread.join(); }
+    return result;
+}
+
+template<typename T>
 Matrix<T> Matrix<T>::parallelMultiply(T val, int chunks) const {
     this->matrixMutex.lock();
     Matrix<T> result = this->get_matrix();
-    chunks = (chunks > this->get_rows() ? this->get_rows() : chunks);
-    int rowsInChunk = this->get_rows() / chunks;
+    int rowsInChunk = get_rows_in_chunk(this->get_rows(), chunks);
     this->matrixMutex.unlock();
 
     std::vector<std::future<void>> futures{};
@@ -353,5 +375,46 @@ Matrix<T> Matrix<T>::parallelMultiply(T val, int chunks) const {
     return result;
 }
 
+template<typename T>
+T Matrix<T>::parallelDeterminant() const {
+    if (rows != cols)
+        exit(1);
+    if (rows == 1)
+        return matrix[0][0];
+    else if (rows == 2)
+        return matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+
+    T ret = 0;
+    int sign = 1;
+    std::vector<std::thread> threads{};
+    for (int i = 0; i < cols; ++i) {
+        threads.push_back(
+                std::thread([&, i, sign, this]() {
+                    Matrix<T> sub = this->sub_matrix(0, i);
+                    ret += sign * matrix[0][i] * sub.det();
+                })
+        );
+        sign = -sign;
+    }
+    for (auto &thread: threads) { thread.join(); }
+    return ret;
+}
+
+template<typename T>
+Matrix<T> Matrix<T>::parallelAdd(const Matrix<T>& other, int chunks) const {
+    this->matrixMutex.lock();
+    Matrix<T> result = this->get_matrix();
+    int rowsInChunk = get_rows_in_chunk(this->get_rows(), chunks);
+    this->matrixMutex.unlock();
+
+    std::vector<std::thread> threads{};
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        threads.push_back(
+                std::thread(addMatrixToChunk<T>, std::ref(other), std::ref(result), chunk, rowsInChunk)
+                );
+    }
+    for (auto& thread: threads) { thread.join(); }
+    return result;
+}
 
 #endif
