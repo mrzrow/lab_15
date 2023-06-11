@@ -41,29 +41,32 @@ public:
     int get_rows() const { return rows; }
     int get_cols() const { return cols; }
 
-    Matrix<T> operator*(const Matrix<T> &) const; // parallel done
+    Matrix<T> operator*(const Matrix<T>&) const; // parallel done
     Matrix<T> operator*(const T &)         const; // parallel done
 
-    Matrix<T> operator+(const Matrix<T> &) const; // parallel done
-    Matrix<T> operator-(const Matrix<T> &) const;
+    Matrix<T> operator+(const Matrix<T>&) const; // parallel done
+    Matrix<T> operator-(const Matrix<T>&) const; // parallel done
 
-    Matrix<float> operator!() const;
+    Matrix<float> operator!() const; // parallel done
 
-    bool operator==(const Matrix<T> &) const;
-    bool operator==(const int &) const;
+    bool operator==(const Matrix<T>&) const; // parallel done
+    bool operator==(const int&) const;
 
-    Matrix<T> &operator=(const Matrix<T> &);
+    Matrix<T>& operator=(const Matrix<T>&);
 
     static Matrix<int> eye(int, int);
     static Matrix<int> zero(int, int);
 
-    Matrix<T> parallelMultiply(const Matrix<T> &, int chunks = 1) const;
-    Matrix<T> parallelMultiply(T, int chunks = 1)                 const;
+    Matrix<T> parallelMultiply(const Matrix<T>&, int chunks=1) const;
+    Matrix<T> parallelMultiply(T, int chunks = 1)              const;
 
     T parallelDeterminant() const;
 
-    Matrix<T> parallelAdd(const Matrix<T>&, int chunks = 1)       const;
-    Matrix<T> parallelSubstract(const Matrix<T>&, int chunks = 1) const;
+    Matrix<T> parallelAdd(const Matrix<T>&, int chunks=1)      const;
+    Matrix<T> parallelSubtract(const Matrix<T>&, int chunks=1) const;
+
+    static bool parallelNotEqual(const Matrix<T>&, const Matrix<T>&, int chunks=1);
+    static bool parallelEqual(const Matrix<T>&, const Matrix<T>&, int chunks=1);
 };
 
 // ##### CONSTRUCTORS && DESTRUCTORS #####
@@ -207,7 +210,7 @@ std::ostream &operator<<(std::ostream &stream, const Matrix<T> &m) {
     for (int i = 0; i < m.get_rows(); ++i) {
         stream << ">  ";
         for (int j = 0; j < m.get_cols(); ++j)
-            stream << m.get_matrix()[i][j] << "\t";
+            stream << m.get_matrix()[i][j] << "  ";
         stream << "\n";
     }
     return stream;
@@ -340,6 +343,17 @@ void addMatrixToChunk(const Matrix<T>& m2, Matrix<T>& m, int chunk, int rowsInCh
     }
 }
 
+template<typename T>
+void subtractMatrixFromChunk(const Matrix<T>& m2, Matrix<T>& m, int chunk, int rowsInChunk) {
+    int start = chunk * rowsInChunk;
+    int stop = (start + rowsInChunk <= m.get_rows() ? start + rowsInChunk : m.get_rows());
+    for (int i = start; i < stop; ++i) {
+        for (int j = 0; j < m.get_cols(); ++j) {
+            m.set_matrix_value(i, j, m.get_matrix_value(i, j) - m2.get_matrix_value(i, j));
+        }
+    }
+}
+
 
 template<typename T>
 Matrix<T> Matrix<T>::parallelMultiply(const Matrix<T> &other, int chunks) const {
@@ -415,6 +429,78 @@ Matrix<T> Matrix<T>::parallelAdd(const Matrix<T>& other, int chunks) const {
     }
     for (auto& thread: threads) { thread.join(); }
     return result;
+}
+
+template<typename T>
+Matrix<T> Matrix<T>::parallelSubtract(const Matrix<T>& other, int chunks) const {
+    this->matrixMutex.lock();
+    Matrix<T> result = this->get_matrix();
+    int rowsInChunk = get_rows_in_chunk(this->get_rows(), chunks);
+    this->matrixMutex.unlock();
+
+    std::vector<std::thread> threads{};
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        threads.push_back(
+                std::thread(subtractMatrixFromChunk<T>, std::ref(other), std::ref(result), chunk, rowsInChunk)
+                );
+    }
+    for (auto& thread: threads) { thread.join(); }
+    return result;
+}
+
+template<typename T>
+bool isChunksEqual(const Matrix<T>&& m2, Matrix<T>&& m, int chunk, int rowsInChunk) {
+    int start = chunk * rowsInChunk;
+    int stop = (start + rowsInChunk <= m.get_rows() ? start + rowsInChunk : m.get_rows());
+    for (int i = start; i < stop; ++i) {
+        for (int j = 0; j < m.get_cols(); ++j) {
+            if (m2.get_matrix_value(i, j) != m.get_matrix_value(i, j)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template<typename T>
+bool isChunksNotEqual(const Matrix<T>&& m2, Matrix<T>&& m, int chunk, int rowsInChunk) {
+    return !isChunksEqual(std::move(m2), std::move(m), chunk, rowsInChunk);
+}
+
+template<typename T>
+bool Matrix<T>::parallelEqual(const Matrix<T>& thiiss, const Matrix<T>& other, int chunks) {
+    thiiss.matrixMutex.lock();
+    int rowsInChunk = get_rows_in_chunk(thiiss.get_rows(), chunks);
+    thiiss.matrixMutex.unlock();
+
+    std::vector<std::future<bool>> futures{};
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        futures.push_back(
+                std::async(std::launch::async, isChunksEqual<T>, other, thiiss, chunk, rowsInChunk)
+        );
+        if (!futures[chunk].get()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template<typename T>
+bool Matrix<T>::parallelNotEqual(const Matrix<T>& thiiss, const Matrix<T>& other, int chunks) {
+    thiiss.matrixMutex.lock();
+    int rowsInChunk = get_rows_in_chunk(thiiss.get_rows(), chunks);
+    thiiss.matrixMutex.unlock();
+
+    std::vector<std::future<bool>> futures{};
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        futures.push_back(
+                std::async(std::launch::async, isChunksNotEqual<T>, other, thiiss, chunk, rowsInChunk)
+        );
+        if (!futures[chunk].get()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 #endif
